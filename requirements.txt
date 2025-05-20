@@ -1,0 +1,7 @@
+pandas
+requests
+nsepython
+yfinance
+newsapi-python
+python-dotenv
+yagmail
