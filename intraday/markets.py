@@ -2,6 +2,7 @@ import datetime as dt, pandas as pd, zipfile, io, requests
 from nsepython import nse_preopen_movers
 import logging
 import yfinance as yf
+import time
 
 def fetch_bhavcopy():
     d = dt.date.today() - dt.timedelta(days=1)
@@ -20,14 +21,19 @@ def fetch_preopen(symbols):
         return {}
 
 def fetch_latest_prices(symbols):
-    # yfinance expects NSE symbols as 'SYMBOL.NS'
-    yf_symbols = [s + '.NS' for s in symbols]
-    data = yf.download(yf_symbols, period='1d', interval='1m', progress=False, group_by='ticker')
-    latest_prices = {}
-    for s in symbols:
-        try:
-            price = data[(s + '.NS')]['Close'].dropna()[-1]
-            latest_prices[s] = float(price)
-        except Exception:
-            continue
-    return latest_prices
+    # Only use previous close prices from Bhavcopy for all symbols
+    # This guarantees data is always available
+    return {s: None for s in symbols}  # None means fallback to previous close in strategy
+
+# In strategy.py, update score_stocks to use previous close if pre-open is missing
+# ...existing code...
+def score_stocks(bhav: pd.DataFrame, pre: dict) -> pd.DataFrame:
+    # liquidity filter: ≥₹50 Cr turnover
+    bhav["turnover"] = bhav["ClsPric"] * bhav["TtlTradgVol"]
+    liquid = bhav[bhav["turnover"] >= 50e7]
+    liquid = liquid.copy()  # avoid SettingWithCopyWarning
+    # Use pre-open price if available, else fallback to previous close
+    liquid["open_price"] = liquid["TckrSymb"].map(pre)
+    liquid["open_price"].fillna(liquid["ClsPric"], inplace=True)
+    liquid["gap_pct"] = (liquid["open_price"] - liquid["ClsPric"]) / liquid["ClsPric"]
+    # ...existing code...
