@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Local data
+data/
+*.db
+
+# macOS
+.DS_Store
