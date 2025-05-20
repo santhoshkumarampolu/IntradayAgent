@@ -23,7 +23,11 @@ def run():
     # log result for later P/L evaluation
     pathlib.Path("data").mkdir(exist_ok=True)
     with sqlite3.connect("data/agent.db") as cx:
-        picks.assign(date=dt.date.today()).to_sql("picks", cx, if_exists="append")
+        # Drop the picks table if it exists to avoid schema mismatch
+        cx.execute("DROP TABLE IF EXISTS picks;")
+        save_cols = [col for col in ['TckrSymb', 'ClsPric', 'entry', 'stop', 'target'] if col in picks.columns]
+        picks_to_save = picks[save_cols].assign(date=dt.date.today())
+        picks_to_save.to_sql("picks", cx, if_exists="replace", index=False)
 
 if __name__ == "__main__":
     run()
