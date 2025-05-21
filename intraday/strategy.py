@@ -311,29 +311,30 @@ def score_stocks(bhav: pd.DataFrame, pre: dict) -> pd.DataFrame:
         return picks
     picks = picks.nlargest(5, "pct_change")
     picks = picks.copy()
+    # --- Calculate entry first ---
+    slippage = 0.001  # 0.1%
+    picks["entry"] = picks[close_col] * (1 + slippage)
+    # --- Calculate stop: never negative, not more than 15% below entry ---
+    raw_stop = picks["entry"] - picks["ATR"] * 1.5
+    min_stop = picks["entry"] * 0.85
+    picks["stop"] = np.where(raw_stop < min_stop, min_stop, raw_stop)
+    picks["stop"] = picks["stop"].clip(lower=0)
+    # --- Calculate target ---
+    picks["target"] = picks["entry"] + np.minimum(picks["ATR"] * 2, picks["entry"] * 0.05)
     # --- Risk management ---
     max_risk_per_trade = 0.01  # 1% of capital
     max_daily_risk = 0.03      # 3% of capital
     capital = 100000  # Example
-    # Optionally, use ML score or pattern match as confidence
     picks["confidence"] = picks.apply(lambda row: ml_predict_intraday_move(row.to_dict()), axis=1)
-    # Position size: risk per trade / (stop distance), scaled by confidence (min 0.5, max 1.5)
     picks["risk_amt"] = capital * max_risk_per_trade
     picks["stop_dist"] = picks["entry"] - picks["stop"]
     picks["confidence_scale"] = picks["confidence"].clip(0.5, 1.5)
     picks["position_size"] = (picks["risk_amt"] / picks["stop_dist"]) * picks["confidence_scale"]
-    # Cap position size to 20% of capital
     picks["position_size"] = picks["position_size"].clip(upper=capital * 0.2)
-    # Cap total daily risk
     total_risk = (picks["position_size"] * picks["stop_dist"]).sum()
     if total_risk > capital * max_daily_risk:
         scale = (capital * max_daily_risk) / total_risk
         picks["position_size"] *= scale
-    # --- Execution/slippage adjustment ---
-    slippage = 0.001  # 0.1%
-    picks["entry"] = picks[close_col] * (1 + slippage)
-    picks["stop"] = picks["entry"] - picks["ATR"] * 1.5
-    picks["target"] = picks["entry"] + np.minimum(picks["ATR"] * 2, picks["entry"] * 0.05)
     # --- Logging for backtesting/monitoring ---
     picks["log_time"] = pd.Timestamp.now()
     return picks.reset_index(drop=True)
