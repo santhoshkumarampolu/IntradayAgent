@@ -5,12 +5,27 @@ import yfinance as yf
 import time
 
 def fetch_bhavcopy():
-    d = dt.date.today() - dt.timedelta(days=1)
+    # Find the most recent weekday (skip Sat/Sun)
+    import datetime as dt
+    import pandas as pd, zipfile, io, requests
+    day_offset = 1
+    while True:
+        d = dt.date.today() - dt.timedelta(days=day_offset)
+        if d.weekday() < 5:  # 0=Mon, ..., 4=Fri
+            break
+        day_offset += 1
     url = f"https://nsearchives.nseindia.com/content/cm/" \
           f"BhavCopy_NSE_CM_0_0_0_{d:%Y%m%d}_F_0000.csv.zip"
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    zf = zipfile.ZipFile(io.BytesIO(r.content))
-    return pd.read_csv(zf.open(zf.namelist()[0]))
+    if r.status_code != 200 or not r.content or r.content[:2] != b'PK':
+        print("Bhavcopy not available or not a valid ZIP file. Likely a holiday or weekend.")
+        return pd.DataFrame()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        return pd.read_csv(zf.open(zf.namelist()[0]))
+    except Exception as e:
+        print(f"Error reading Bhavcopy ZIP: {e}")
+        return pd.DataFrame()
 
 def fetch_preopen(symbols):
     try:

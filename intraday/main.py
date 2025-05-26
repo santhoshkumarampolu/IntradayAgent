@@ -14,6 +14,9 @@ def run():
         return
 
     bhav = markets.fetch_bhavcopy()
+    if bhav.empty:
+        print("Bhavcopy DataFrame is empty. Skipping downstream processing.")
+        return bhav
     # Use yfinance for latest prices instead of pre-open
     latest = markets.fetch_latest_prices(bhav.TckrSymb.to_list())
 
@@ -25,8 +28,9 @@ def run():
     with sqlite3.connect("data/agent.db") as cx:
         # Drop the picks table if it exists to avoid schema mismatch
         cx.execute("DROP TABLE IF EXISTS picks;")
-        save_cols = [col for col in ['TckrSymb', 'ClsPric', 'entry', 'stop', 'target'] if col in picks.columns]
-        picks_to_save = picks[save_cols].assign(date=dt.date.today())
+        # Save all columns from picks, not just a subset, for dashboard analytics
+        picks_to_save = picks.copy()
+        picks_to_save['date'] = dt.date.today()
         picks_to_save.to_sql("picks", cx, if_exists="replace", index=False)
 
 if __name__ == "__main__":

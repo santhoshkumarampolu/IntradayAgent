@@ -255,57 +255,92 @@ def score_stocks(bhav: pd.DataFrame, pre: dict) -> pd.DataFrame:
         rsi_min, rsi_max = 35, 70
     # --- Filtering ---
     newsapi = NewsApiClient(api_key=os.getenv("NEWSAPI_KEY"))
+    # --- Volume Surge Filter ---
+    avg_vol = liquid['TtlTradgVol'].rolling(window=10, min_periods=1).mean()
+    liquid = liquid[liquid['TtlTradgVol'] > avg_vol * 1.5]  # 50% above 10-day avg
+
+    # --- Multi-Timeframe Confirmation (Daily + 15-min) ---
+    def intraday_trend(symbol):
+        try:
+            df = yf.download(symbol + '.NS', period='5d', interval='15m')
+            if len(df) < 20:
+                return None
+            ema20 = df['Close'].ewm(span=20).mean()
+            ema50 = df['Close'].ewm(span=50).mean()
+            return 'bull' if ema20.iloc[-1] > ema50.iloc[-1] else 'bear'
+        except Exception:
+            return None
+
+    # --- Add more technical indicators ---
+    liquid['MACD'] = ta.trend.macd_diff(liquid[close_col])
+    liquid['STOCH'] = ta.momentum.stoch(liquid[high_col], liquid[low_col], liquid[close_col])
+
+    # --- Price Action Patterns ---
+    def is_bullish_engulfing(row):
+        try:
+            return row['ClsPric'] > row['OpnPric'] and row['PrevClsPric'] < row['PrevOpnPric'] and row['ClsPric'] > row['PrevOpnPric'] and row['OpnPric'] < row['PrevClsPric']
+        except:
+            return False
+
+    # --- Market Breadth (NIFTY trend) ---
+    try:
+        nifty = yf.download('^NSEI', period='10d', interval='1d')
+        nifty_trend = 'bull' if nifty['Close'].iloc[-1] > nifty['Close'].ewm(span=20).mean().iloc[-1] else 'bear'
+    except Exception:
+        nifty_trend = 'bull'
+
+    # --- Filtering with new logic ---
     filtered = []
     for _, row in liquid.iterrows():
-        # --- Fundamental filter ---
-        fdata = get_fundamental_data(row["TckrSymb"])
-        if fdata['pe'] > 40 or fdata['debt_equity'] > 1 or fdata['promoter_holding'] < 30:
+        symbol = row['TckrSymb']
+        # Volume surge
+        if row['TtlTradgVol'] <= avg_vol.loc[row.name] * 1.5:
             continue
-        # --- Technicals ---
-        if pd.isna(row["RSI"]) or pd.isna(row["EMA20"]) or pd.isna(row["EMA50"]) or pd.isna(row["ADX"]) or pd.isna(row["VWAP"]) or pd.isna(row["ATR"]):
+        # Multi-timeframe trend
+        intraday_tf = intraday_trend(symbol)
+        if intraday_tf and intraday_tf != regime['trend']:
             continue
-        if not (rsi_min < row["RSI"] < rsi_max):
+        # Technicals
+        if pd.isna(row['RSI']) or pd.isna(row['EMA20']) or pd.isna(row['EMA50']) or pd.isna(row['ADX']) or pd.isna(row['VWAP']) or pd.isna(row['ATR']) or pd.isna(row['MACD']) or pd.isna(row['STOCH']):
             continue
-        if row["EMA20"] < row["EMA50"]:
+        if not (rsi_min < row['RSI'] < rsi_max):
             continue
-        if row["ADX"] < 15:
+        if row['EMA20'] < row['EMA50']:
             continue
-        if row[close_col] < row["VWAP"]:
+        if row['ADX'] < 15:
             continue
-        if row["ATR"] <= 0 or row["ATR"] > row[close_col] * 0.2:
+        if row[close_col] < row['VWAP']:
             continue
-        # --- News/Sentiment filter (as before) ---
-        symbol = row["TckrSymb"]
+        if row['ATR'] <= 0 or row['ATR'] > row[close_col] * 0.2:
+            continue
+        if row['MACD'] < 0:
+            continue
+        if not (20 < row['STOCH'] < 80):
+            continue
+        # Price action
+        if not is_bullish_engulfing(row):
+            continue
+        # News/Sentiment
         sentiment = get_news_sentiment_openai(newsapi, symbol)
         if sentiment == 'negative':
             continue
-        # --- Real-time price (if available) ---
-        realtime_price = get_realtime_price(row["TckrSymb"])
-        # --- Order book features ---
-        ob_features = get_order_book_features(row["TckrSymb"])
-        # --- ML model prediction ---
-        features = row.to_dict()  # plus any engineered features
-        ml_score = ml_predict_intraday_move(features)
-        # --- Candlestick pattern recognition ---
-        patterns = detect_candlestick_patterns(row)
-        # --- Sector/theme rotation ---
-        sector_strength = get_sector_strength(row["TckrSymb"])
-        # --- Event-driven trading ---
-        has_event = check_event_driven(row["TckrSymb"])
-        # --- Correlation/pair trading ---
-        pairs = get_correlation_pairs(row["TckrSymb"], liquid["TckrSymb"])
-        # --- User feedback loop ---
-        feedback = get_user_feedback(row["TckrSymb"])
-        # --- Example: Use these features in filtering/scoring (customize as needed) ---
-        if ml_score < 0.4:
+        # Sector/market breadth
+        sector_strength = get_sector_strength(symbol)
+        if sector_strength < 0 and nifty_trend != 'bull':
             continue
-        if sector_strength < 0 and not has_event:
+        # Illiquidity filter
+        if row['TtlTradgVol'] < 100000:
+            continue
+        # ML model
+        features = row.to_dict()
+        ml_score = ml_predict_intraday_move(features)
+        if ml_score < 0.5:
             continue
         filtered.append(row)
     picks = pd.DataFrame(filtered)
-    # --- Fallback: if <3 picks, fill with top liquid stocks by pct_change (ignore technicals/sentiment) ---
-    if picks.shape[0] < 3:
-        fallback = liquid.nlargest(3, "pct_change").drop_duplicates(subset=["TckrSymb"])
+    # --- Fallback: if <5 picks, fill with top liquid stocks by pct_change (ignore technicals/sentiment) ---
+    if picks.shape[0] < 5:
+        fallback = liquid.nlargest(5, "pct_change").drop_duplicates(subset=["TckrSymb"])
         picks = pd.concat([picks, fallback]).drop_duplicates(subset=["TckrSymb"]).head(5)
     if picks.empty:
         return picks
@@ -320,7 +355,22 @@ def score_stocks(bhav: pd.DataFrame, pre: dict) -> pd.DataFrame:
     picks["stop"] = np.where(raw_stop < min_stop, min_stop, raw_stop)
     picks["stop"] = picks["stop"].clip(lower=0)
     # --- Calculate target ---
-    picks["target"] = picks["entry"] + np.minimum(picks["ATR"] * 2, picks["entry"] * 0.05)
+    min_target_dist = picks["entry"] * 0.10  # 10% of entry as minimum target distance
+    target_dist = np.maximum(np.minimum(picks["ATR"] * 2, picks["entry"] * 0.15), min_target_dist)
+    picks["target"] = picks["entry"] + target_dist
+    # --- Calculate trailing stop (ATR-based) ---
+    picks["trailing_stop"] = picks["entry"] - picks["ATR"] * 1.0  # Initial trailing stop 1x ATR below entry
+    # --- Partial profit booking at 1:1 risk-reward ---
+    picks["partial_target"] = picks["entry"] + (picks["entry"] - picks["stop"])  # 1:1 RR
+    # --- Advanced analytics columns ---
+    picks["risk_reward_ratio"] = (picks["target"] - picks["entry"]) / (picks["entry"] - picks["stop"])
+    # Only calculate advanced analytics if 'position_size' exists
+    if 'position_size' in picks.columns:
+        picks["potential_profit"] = (picks["target"] - picks["entry"]) * picks["position_size"]
+        picks["potential_loss"] = (picks["entry"] - picks["stop"]) * picks["position_size"]
+    else:
+        picks["potential_profit"] = np.nan
+        picks["potential_loss"] = np.nan
     # --- Risk management ---
     max_risk_per_trade = 0.01  # 1% of capital
     max_daily_risk = 0.03      # 3% of capital
@@ -337,4 +387,20 @@ def score_stocks(bhav: pd.DataFrame, pre: dict) -> pd.DataFrame:
         picks["position_size"] *= scale
     # --- Logging for backtesting/monitoring ---
     picks["log_time"] = pd.Timestamp.now()
+    # --- Add volume columns for dashboard analytics ---
+    # Get last 5 days' volumes for each symbol using yfinance
+    def get_last_5_volumes(symbol):
+        try:
+            df = yf.download(symbol + '.NS', period='7d', interval='1d')
+            vols = df['Volume'].tail(5).tolist()
+            # If less than 5 days, pad with np.nan
+            while len(vols) < 5:
+                vols = [np.nan] + vols
+            return vols[-5:]
+        except Exception:
+            return [np.nan]*5
+    
+    picks[['volume', 'vol_1d_ago', 'vol_2d_ago', 'vol_3d_ago', 'vol_4d_ago']] = picks['TckrSymb'].apply(
+        lambda sym: pd.Series(get_last_5_volumes(sym))
+    )
     return picks.reset_index(drop=True)
